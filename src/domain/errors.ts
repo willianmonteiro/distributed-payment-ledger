@@ -22,3 +22,9 @@ export class InsufficientFundsError extends DomainError {
     super(`Account ${accountId} has insufficient funds.`);
   }
 }
+
+export class AccountNotFoundError extends DomainError {
+  constructor(accountId: string) {
+    super(`Account ${accountId} not found.`);
+  }
+}
