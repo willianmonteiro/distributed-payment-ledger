@@ -33,6 +33,20 @@ services:
     volumes:
       - postgres-bank-b-data:/var/lib/postgresql/data
 
+  # Message broker between Bank A and Bank B. Ephemeral by design: the
+  # outbox table in each bank's own Postgres is the durable source of
+  # truth, not the broker — a lost queue just means the relay republishes.
+  rabbitmq:
+    image: rabbitmq:4-management
+    ports:
+      - '5672:5672'
+      - '15672:15672'
+    healthcheck:
+      test: ['CMD', 'rabbitmq-diagnostics', 'check_port_connectivity']
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
 volumes:
   postgres-data:
   postgres-bank-b-data:
