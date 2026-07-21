@@ -4,3 +4,12 @@ coverage
 .env
 *.log
 .DS_Store
+study.md
+
+# bank-b (Python)
+__pycache__
+*.pyc
+.venv
+.mypy_cache
+.pytest_cache
+.ruff_cache

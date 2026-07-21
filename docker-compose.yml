@@ -1,4 +1,5 @@
 services:
+  # Bank A (src/, NestJS)
   postgres:
     image: postgres:16-alpine
     environment:
@@ -15,5 +16,23 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
+  # Bank B (bank-b/, FastAPI) — a separate institution, its own database
+  postgres-bank-b:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: bank_b
+      POSTGRES_PASSWORD: bank_b
+      POSTGRES_DB: bank_b
+    ports:
+      - '5434:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U bank_b']
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    volumes:
+      - postgres-bank-b-data:/var/lib/postgresql/data
+
 volumes:
   postgres-data:
+  postgres-bank-b-data:
