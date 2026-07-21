@@ -8,5 +8,6 @@ import { AccountsService } from './accounts.service';
   imports: [LedgerModule],
   controllers: [AccountsController],
   providers: [AccountsService, AccountRepository],
+  exports: [AccountRepository],
 })
 export class AccountsModule {}

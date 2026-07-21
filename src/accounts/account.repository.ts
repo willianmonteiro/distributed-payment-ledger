@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { Pool } from 'pg';
+import { Pool, PoolClient } from 'pg';
 import { Account } from '../domain';
 import { PG_POOL } from '../infra/database/database.module';
 
@@ -27,6 +27,12 @@ export class AccountRepository {
       [id],
     );
     return rows[0] ? toAccount(rows[0]) : null;
+  }
+
+  /** Row-locks the account until the caller's transaction ends. Returns false when it doesn't exist. */
+  async lockById(id: string, client: PoolClient): Promise<boolean> {
+    const { rows } = await client.query('SELECT 1 FROM accounts WHERE id = $1 FOR UPDATE', [id]);
+    return rows.length > 0;
   }
 }
 

@@ -28,3 +28,15 @@ export class AccountNotFoundError extends DomainError {
     super(`Account ${accountId} not found.`);
   }
 }
+
+export class TransferNotFoundError extends DomainError {
+  constructor(transferId: string) {
+    super(`Transfer ${transferId} not found.`);
+  }
+}
+
+export class IdempotencyConflictError extends DomainError {
+  constructor() {
+    super('Idempotency key was already used with different parameters.');
+  }
+}

@@ -3,14 +3,18 @@ import { Response } from 'express';
 import {
   AccountNotFoundError,
   DomainError,
+  IdempotencyConflictError,
   InsufficientFundsError,
   InvalidAmountError,
   SelfTransferError,
+  TransferNotFoundError,
 } from '../domain';
 
 const STATUS_BY_ERROR: ReadonlyArray<[new (...args: never[]) => DomainError, HttpStatus]> = [
   [AccountNotFoundError, HttpStatus.NOT_FOUND],
+  [TransferNotFoundError, HttpStatus.NOT_FOUND],
   [InsufficientFundsError, HttpStatus.UNPROCESSABLE_ENTITY],
+  [IdempotencyConflictError, HttpStatus.CONFLICT],
   [InvalidAmountError, HttpStatus.BAD_REQUEST],
   [SelfTransferError, HttpStatus.BAD_REQUEST],
 ];

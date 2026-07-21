@@ -6,6 +6,7 @@ import { HealthModule } from './health/health.module';
 import { DomainExceptionFilter } from './http/domain-exception.filter';
 import { DatabaseModule } from './infra/database/database.module';
 import { LedgerModule } from './ledger/ledger.module';
+import { TransfersModule } from './transfers/transfers.module';
 
 @Module({
   imports: [
@@ -14,6 +15,7 @@ import { LedgerModule } from './ledger/ledger.module';
     HealthModule,
     LedgerModule,
     AccountsModule,
+    TransfersModule,
   ],
   providers: [{ provide: APP_FILTER, useClass: DomainExceptionFilter }],
 })
