@@ -124,7 +124,7 @@ erDiagram
         timestamptz created_at
     }
     interbank_transfers {
-        uuid transfer_id PK_FK
+        uuid transfer_id PK, FK
         text payee_account_ref
         text status
         timestamptz created_at
