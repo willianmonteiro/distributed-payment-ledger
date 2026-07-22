@@ -13,6 +13,7 @@
     "migrate": "tsx scripts/migrate.ts",
     "lint": "eslint \"{src,test,scripts}/**/*.ts\"",
     "test": "jest --passWithNoTests",
+    "test:e2e": "npm run build && jest --config jest-e2e.config.js",
     "format": "prettier --write \"{src,test,scripts}/**/*.ts\""
   },
   "dependencies": {
