@@ -46,6 +46,8 @@ A single-database ledger can make a transfer atomic for free — one Postgres tr
 
 Each bank owns its database outright and never queries the other's — the only contract between them is the shape of the events on `bank-transfers` and, for reconciliation, one internal HTTP endpoint. A transfer to Bank B is booked locally at Bank A as an ordinary transfer to a well-known **suspense (transit) account** (`00000000-0000-0000-0000-000000000001`), so Bank A's own double-entry invariant — every transfer sums to zero — never has to bend for the fact that the money is, for a while, headed somewhere Bank A can't see into. Bank B does the mirror image on its side: crediting a payee for money arriving from Bank A is paired with a debit to Bank B's own suspense account.
 
+A visual, editable version of this diagram is in [`architecture.excalidraw`](./architecture.excalidraw) — open it at [excalidraw.com](https://excalidraw.com) (File → Open) or with the Excalidraw VS Code extension.
+
 ## The saga
 
 ```mermaid
@@ -201,7 +203,3 @@ poetry run mypy app scripts tests
 ```
 
 `npm test` and `poetry run pytest` need `docker compose up -d` and both banks' migrations applied first. `npm run test:e2e` additionally builds Bank A and needs `bank-b/`'s dependencies installed (`poetry install`) — it spawns both real processes itself, so no server needs to already be running, but ports 3000 and 8001 must be free.
-
-## What's next
-
-The two-bank saga is complete: outbox, idempotent messaging, compensation, and reconciliation all cover their respective failure modes, verified both by automated tests and by hand against the real running services. What's left is presentation, not architecture — a small frontend visualizing both banks' balances, the suspense account filling and draining, and each transfer's saga state changing in real time, to make the distributed-systems machinery legible at a glance instead of only provable by reading code and logs.
