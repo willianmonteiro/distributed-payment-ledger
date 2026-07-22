@@ -8,6 +8,7 @@ class Settings(BaseSettings):
 
     database_url: str
     port: int = 8001
+    rabbitmq_url: str = "amqp://localhost:5672"
 
 
 @lru_cache
