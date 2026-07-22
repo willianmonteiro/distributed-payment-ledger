@@ -1,63 +1,96 @@
 # distributed-payment-ledger
 
-A double-entry payment ledger built with NestJS and PostgreSQL — a "mini-Pix" instant-payment core, evolving into a distributed clearing system across two services.
+A double-entry payment ledger built with NestJS and PostgreSQL — a "mini-Pix" instant-payment core, evolved into a distributed clearing system between two independent bank services (Bank A in NestJS, Bank B in FastAPI) that settle transfers through a message broker.
 
 ## Roadmap
 
+**Milestone 1 — single-bank ledger**
 - [x] Service scaffold: NestJS, PostgreSQL, SQL migrations, health check
 - [x] Domain model: money as integer cents, accounts, transfer invariants
 - [x] Append-only double-entry ledger with derived balances
 - [x] Atomic transfers: per-account locking + idempotency keys
 - [x] Integration test suite: concurrency and retry guarantees
 - [x] Full documentation with architecture diagrams
-- [ ] Outbox pattern + message broker
-- [ ] Second bank service + transfer saga with compensation
-- [ ] Reconciliation job
 
-## Design rationale
+**Milestone 2 — distributed clearing between two banks**
+- [x] Bank B scaffold: FastAPI, its own PostgreSQL, health check
+- [x] Transactional outbox + relay poller (Bank A)
+- [x] Interbank transfers via a suspense/transit account (Bank A)
+- [x] Bank B: domain model + append-only ledger (mirrors Bank A)
+- [x] Bank B: inbound transfer consumer, idempotent crediting
+- [x] Bank A: reply consumer + compensation on rejection
+- [x] Reconciliation job for transfers an event never resolved
+- [x] Dual-process saga end-to-end test suite
+- [x] Two-bank architecture documentation (this section)
 
-**Money is never a float.** `Money` (`src/domain/money.ts`) wraps a signed integer number of cents and rejects anything that isn't a safe integer. Every arithmetic op returns a new `Money`, so a rounding bug can't silently enter through a stray `0.1 + 0.2`.
+## Why two banks
 
-**The ledger is the source of truth; balances are derived, never stored.** `ledger_entries` is append-only — `UPDATE`/`DELETE` are rejected by a database trigger, not just application convention — so a balance is always `SUM(amount)` over history (`LedgerRepository.balanceOf`). A correction is a new entry, never a rewrite. This is the same reasoning production ledgers use: the audit trail *is* the data structure, not a side effect of it.
+A single-database ledger can make a transfer atomic for free — one Postgres transaction, one commit, done. Real interbank transfers can't: Bank A and Bank B have separate databases that can't share a transaction, and distributed two-phase commit isn't used in practice because a crashed coordinator leaves every participant blocked holding locks indefinitely. So milestone 2 is a deliberately harder, more realistic problem: move money between two systems that can only coordinate through asynchronous messages, without ever losing or duplicating it, given that any message can be delayed, lost, or delivered twice.
 
-**A transfer is two entries that must sum to zero.** `Transfer.entries()` produces a debit on the payer and a credit on the payee for the same amount, inserted in the same transaction. There's no code path that can create money — the invariant is enforced by construction, not by a reconciliation job checking after the fact.
+## Two-bank architecture
 
-**Overdraft is impossible under concurrency, not just unlikely.** A transfer takes `FOR UPDATE` row locks on both accounts, sorted by id, before reading a balance — see [Locking discipline](#locking-discipline) below. This is verified, not assumed: `transfers.integration.spec.ts` fires ten concurrent transfers against a balance that can only cover seven and asserts exactly seven succeed and the balance never goes negative.
+```
+┌──────────────────────┐                                    ┌──────────────────────┐
+│   Bank A (NestJS)     │        RabbitMQ topic exchange     │   Bank B (FastAPI)    │
+│   src/                │           "bank-transfers"         │   bank-b/             │
+│                       │  ───── transfer.initiated.bank-b ─▶│                       │
+│  accounts, transfers  │                                    │  inbound consumer     │
+│  outbox + relay       │◀──── transfer.reply.bank-a ─────── │  idempotent crediting │
+│  reply consumer       │                                    │  own suspense account │
+│  compensation logic   │                                    │                       │
+│  reconciliation sweep │─────── GET /internal/transfers/:id▶│  internal endpoint    │
+│                       │                                    │                       │
+│  Postgres :5433       │                                    │  Postgres :5434       │
+└──────────────────────┘                                    └──────────────────────┘
+```
 
-**Retried requests can't move money twice.** Every transfer carries a client-supplied `Idempotency-Key`. The key has a unique DB constraint; a retry with the same key and payload replays the original result, and a retry with the same key but a different payload is rejected as a conflict (`IdempotencyConflictError`, HTTP 409) rather than silently doing the wrong thing.
+Each bank owns its database outright and never queries the other's — the only contract between them is the shape of the events on `bank-transfers` and, for reconciliation, one internal HTTP endpoint. A transfer to Bank B is booked locally at Bank A as an ordinary transfer to a well-known **suspense (transit) account** (`00000000-0000-0000-0000-000000000001`), so Bank A's own double-entry invariant — every transfer sums to zero — never has to bend for the fact that the money is, for a while, headed somewhere Bank A can't see into. Bank B does the mirror image on its side: crediting a payee for money arriving from Bank A is paired with a debit to Bank B's own suspense account.
 
-**The domain layer imports nothing from NestJS or pg.** `src/domain/*` has zero framework dependencies — `Money`, `Account`, `Transfer` are plain TypeScript classes with their own unit tests (`money.spec.ts`, `transfer.spec.ts`). Framework code (controllers, repositories, modules) sits in a shell around it and is exercised by the integration suite instead.
-
-## Locking discipline
-
-Two accounts are involved in every transfer, and two concurrent transfers can involve the same pair in opposite directions (A→B and B→A at the same time). Locking them in a fixed order — sorted by UUID — means every transaction acquires locks in the same global order, so a deadlock between opposing transfers is structurally impossible rather than merely handled via retry.
+## The saga
 
 ```mermaid
 sequenceDiagram
     participant C as Client
-    participant S as TransfersService
-    participant DB as Postgres
+    participant A as Bank A
+    participant MQ as RabbitMQ
+    participant B as Bank B
 
-    C->>S: POST /transfers (Idempotency-Key: k)
-    S->>DB: SELECT ... WHERE idempotency_key = k
-    alt key already used
-        DB-->>S: existing transfer
-        S-->>C: 200/409 (replay or conflict)
-    else new key
-        S->>DB: BEGIN
-        S->>DB: SELECT ... FOR UPDATE (accounts sorted by id)
-        S->>DB: INSERT INTO transfers ... ON CONFLICT DO NOTHING
-        S->>DB: SELECT SUM(amount) (balance, serialized by the lock)
-        alt payer can afford it
-            S->>DB: INSERT INTO ledger_entries (debit, credit)
-            S->>DB: COMMIT
-            S-->>C: 201 Created
-        else insufficient funds
-            S->>DB: ROLLBACK
-            S-->>C: 422 Unprocessable Entity
-        end
+    C->>A: POST /interbank-transfers (Idempotency-Key: k)
+    A->>A: BEGIN: debit payer, credit suspense, INSERT outbox row (one tx)
+    A->>A: COMMIT
+    A-->>C: 201 Created (status: DEBITED)
+    Note over A: OutboxRelayService polls every 1s
+    A->>MQ: publish transfer.initiated (routing key: transfer.initiated.bank-b)
+    MQ->>B: deliver transfer.initiated
+    alt payee account exists
+        B->>B: BEGIN: INSERT incoming_transfers (dedupe on transfer_id), credit payee
+        B->>B: COMMIT
+        B->>MQ: publish transfer.accepted
+    else account not found
+        B->>MQ: publish transfer.rejected (reason: ACCOUNT_NOT_FOUND)
     end
+    MQ->>A: deliver reply
+    alt accepted
+        A->>A: interbank_transfers.status = CONFIRMED
+    else rejected
+        A->>A: compensating transfer: suspense -> payer, status = COMPENSATED
+    end
+    Note over A: ReconciliationService sweeps every 60s
+    A->>A: find interbank_transfers DEBITED for 5+ minutes
+    A->>B: GET /internal/transfers/:id (only if the reply never arrived)
+    B-->>A: ground truth (CREDITED / REJECTED / 404)
+    A->>A: apply the same CONFIRMED/COMPENSATED logic the reply path uses
 ```
+
+Three independent mechanisms make this safe under real-world failure, each solving a different distributed-systems problem:
+
+**The transactional outbox solves the dual-write problem.** Debiting the payer in Postgres and publishing to RabbitMQ are two separate systems that can't be updated atomically. Writing the event as a row in `outbox_events` inside the same transaction as the debit means the event exists if and only if the debit happened; a separate poller (`OutboxRelayService`, `SELECT ... FOR UPDATE SKIP LOCKED` so multiple instances can run without double-publishing) publishes it afterward, safe to retry indefinitely.
+
+**Idempotency keys make every step safe to redeliver.** RabbitMQ is at-least-once, not exactly-once — a message can be delivered twice. Bank B's `incoming_transfers.transfer_id` and Bank A's compensation key (`compensation-<transferId>`) both use `INSERT ... ON CONFLICT DO NOTHING`, so a redelivered message credits or compensates once, not twice — verified under literal concurrent delivery, not just sequential retries (see `interbank-transfers.integration.spec.ts` and `bank-b/tests/transfers/test_service.py`).
+
+**Reconciliation is the safety net for messages that never arrive at all.** The saga above handles success and explicit rejection; it does not handle a message silently vanishing — a broker restart, a purged queue. `ReconciliationService` sweeps for transfers stuck `DEBITED` past a threshold comfortably longer than normal processing time, asks Bank B directly instead of waiting on an event that may never come, and applies whatever the truth turns out to be. This was verified against the real running scheduler, not just a test: a transfer was manually reset to `DEBITED` with a backdated timestamp, and the actual 60-second interval in a live process found and fixed it via a real HTTP call to a real Bank B.
+
+Deeper design rationale — why suspense accounts instead of some other approach, why choreography over orchestration, what two-phase commit gets wrong, how this relates to CAP — is written up with references in `study.md` (gitignored; personal study notes, not part of this deliverable).
 
 ## Data model
 
@@ -65,6 +98,8 @@ sequenceDiagram
 erDiagram
     accounts ||--o{ ledger_entries : "has"
     transfers ||--|{ ledger_entries : "produces exactly 2"
+    transfers ||--o| interbank_transfers : "may accompany"
+    transfers ||--o{ outbox_events : "may emit"
 
     accounts {
         uuid id PK
@@ -86,44 +121,87 @@ erDiagram
         bigint amount
         timestamptz created_at
     }
+    interbank_transfers {
+        uuid transfer_id PK_FK
+        text payee_account_ref
+        text status
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    outbox_events {
+        bigint id PK
+        uuid aggregate_id
+        text event_type
+        text routing_key
+        jsonb payload
+        timestamptz published_at
+    }
 ```
 
-`transfers` and `ledger_entries` are both append-only (enforced by `BEFORE UPDATE OR DELETE` triggers). `ledger_entries.amount` is signed and always comes in pairs that sum to zero for a given `transfer_id`; `accounts` has no balance column at all.
+`transfers` and `ledger_entries` are append-only, enforced by `BEFORE UPDATE OR DELETE` triggers — a compensation is a new `transfers` row, never a rewrite of the original debit. `interbank_transfers` is the one deliberately mutable table in the schema: it tracks in-flight saga *process* state (`DEBITED` → `CONFIRMED`/`COMPENSATED`), not money-of-record — the money itself is already final in `ledger_entries` the instant the local debit commits. Bank B's schema (`bank-b/migrations/`) mirrors `accounts`/`ledger_entries` and adds `incoming_transfers`, keyed on the `transfer_id` Bank A generated — the single dedupe key that threads through the whole saga.
 
 ## API
 
-| Method | Path                     | Notes                                          |
-| ------ | ------------------------ | ----------------------------------------------- |
-| POST   | `/accounts`               | `{ ownerName }`                                 |
-| GET    | `/accounts/:id`           |                                                  |
-| GET    | `/accounts/:id/balance`   | Derived from `ledger_entries`, not stored        |
-| GET    | `/accounts/:id/statement` | Most recent entries, newest first                |
-| POST   | `/transfers`              | Requires `Idempotency-Key` header                |
-| GET    | `/transfers/:id`          |                                                  |
+**Bank A** (`http://localhost:3000`)
 
-There is currently no endpoint that injects money into the system (no faucet/mint) — every transfer needs a payer with a prior positive balance, which is the correct instant-payment model but means a fresh database has to be seeded directly (see the integration test's `openWithBalance` helper) to exercise a non-trivial transfer by hand.
+| Method | Path                          | Notes                                                        |
+| ------ | ------------------------------ | ------------------------------------------------------------- |
+| POST   | `/accounts`                    | `{ ownerName }`                                                |
+| GET    | `/accounts/:id`                |                                                                 |
+| GET    | `/accounts/:id/balance`        | Derived from `ledger_entries`, not stored                      |
+| GET    | `/accounts/:id/statement`      | Most recent entries, newest first                              |
+| POST   | `/transfers`                   | Local A→A transfer. Requires `Idempotency-Key` header           |
+| GET    | `/transfers/:id`               |                                                                 |
+| POST   | `/interbank-transfers`         | A→B transfer. `{ payerAccountId, payeeAccountRef, amountCents }`, requires `Idempotency-Key` |
+| GET    | `/interbank-transfers/:id`     | Includes saga `status`: `DEBITED` / `CONFIRMED` / `COMPENSATED` |
+
+**Bank B** (`http://localhost:8001`)
+
+| Method | Path                          | Notes                                                        |
+| ------ | ------------------------------ | ------------------------------------------------------------- |
+| POST   | `/accounts`                    | `{ owner_name }`                                                |
+| GET    | `/accounts/:id`                |                                                                 |
+| GET    | `/accounts/:id/balance`        |                                                                 |
+| GET    | `/accounts/:id/statement`      |                                                                 |
+| GET    | `/internal/transfers/:id`      | Ground truth used by Bank A's reconciliation sweep — not meant for public/client use |
+
+Neither bank has a faucet/mint endpoint — every account starts at zero, so exercising a non-trivial transfer by hand means seeding a balance directly against Postgres (see `openWithBalance` in the integration tests, or `test/saga-e2e.spec.ts`'s `seedBankABalance`).
 
 ## Running
 
+Both banks, RabbitMQ, and both Postgres instances:
+
 ```sh
+docker compose up -d
+
 nvm use
 npm install
-docker compose up -d
 npm run migrate
-npm run start:dev
+npm run start:dev          # Bank A on :3000
+
+cd bank-b
+poetry install
+poetry run python scripts/migrate.py
+poetry run uvicorn app.main:app --port 8001 --reload   # Bank B on :8001
 ```
 
-Health check: `curl http://localhost:3000/health`
+Health checks: `curl http://localhost:3000/health` and `curl http://localhost:8001/health`. RabbitMQ's management UI is at `http://localhost:15672` (guest/guest).
 
 ## Testing
 
 ```sh
-npm test    # unit tests (domain) + integration tests (real Postgres)
+npm test          # Bank A: unit + integration tests (real Postgres/RabbitMQ)
+npm run test:e2e  # spawns the real compiled Bank A + real Bank B and drives the saga over HTTP
 npm run lint
+
+cd bank-b
+poetry run pytest       # Bank B: unit + integration tests (real Postgres)
+poetry run ruff check .
+poetry run mypy app scripts tests
 ```
 
-The integration suite (`src/transfers/transfers.integration.spec.ts`) requires `docker compose up -d` and `npm run migrate` to have been run first — it exercises real row locks, not mocks.
+`npm test` and `poetry run pytest` need `docker compose up -d` and both banks' migrations applied first. `npm run test:e2e` additionally builds Bank A and needs `bank-b/`'s dependencies installed (`poetry install`) — it spawns both real processes itself, so no server needs to already be running, but ports 3000 and 8001 must be free.
 
 ## What's next
 
-The next milestone turns this into a distributed system: an outbox table + poller publishes committed transfers to a broker, a second bank service consumes them, and a saga with compensating transactions handles the case where the second leg fails after the first has committed — the interesting distributed-systems problem this single-service ledger can't demonstrate on its own.
+The two-bank saga is complete: outbox, idempotent messaging, compensation, and reconciliation all cover their respective failure modes, verified both by automated tests and by hand against the real running services. What's left is presentation, not architecture — a small frontend visualizing both banks' balances, the suspense account filling and draining, and each transfer's saga state changing in real time, to make the distributed-systems machinery legible at a glance instead of only provable by reading code and logs.
