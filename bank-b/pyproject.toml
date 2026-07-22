@@ -31,6 +31,11 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency injection idiom is `param: T = Depends(...)` — a call
+# in a default argument on purpose, not the mutable-default footgun B008 flags.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.params.Depends"]
+
 [tool.mypy]
 strict = true
 python_version = "3.12"
@@ -41,3 +46,4 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+pythonpath = ["."]
