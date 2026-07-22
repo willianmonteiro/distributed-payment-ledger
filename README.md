@@ -52,36 +52,46 @@ A visual, editable version of this diagram is in [`architecture.excalidraw`](./a
 
 ```mermaid
 sequenceDiagram
+    autonumber
     participant C as Client
     participant A as Bank A
     participant MQ as RabbitMQ
     participant B as Bank B
 
     C->>A: POST /interbank-transfers (Idempotency-Key: k)
-    A->>A: BEGIN: debit payer, credit suspense, INSERT outbox row (one tx)
-    A->>A: COMMIT
+    Note over A: one Postgres tx: debit payer,<br/>credit suspense, INSERT outbox row, COMMIT
     A-->>C: 201 Created (status: DEBITED)
+
     Note over A: OutboxRelayService polls every 1s
-    A->>MQ: publish transfer.initiated (routing key: transfer.initiated.bank-b)
+    A->>MQ: publish transfer.initiated<br/>(routing key: transfer.initiated.bank-b)
     MQ->>B: deliver transfer.initiated
+
     alt payee account exists
-        B->>B: BEGIN: INSERT incoming_transfers (dedupe on transfer_id), credit payee
-        B->>B: COMMIT
+        Note over B: one Postgres tx: INSERT incoming_transfers<br/>(dedupe on transfer_id), credit payee, COMMIT
         B->>MQ: publish transfer.accepted
     else account not found
-        B->>MQ: publish transfer.rejected (reason: ACCOUNT_NOT_FOUND)
+        B->>MQ: publish transfer.rejected<br/>(reason: ACCOUNT_NOT_FOUND)
     end
+
     MQ->>A: deliver reply
     alt accepted
-        A->>A: interbank_transfers.status = CONFIRMED
+        Note over A: interbank_transfers.status = CONFIRMED
     else rejected
-        A->>A: compensating transfer: suspense -> payer, status = COMPENSATED
+        Note over A: compensating transfer: suspense -> payer,<br/>status = COMPENSATED
     end
-    Note over A: ReconciliationService sweeps every 60s
-    A->>A: find interbank_transfers DEBITED for 5+ minutes
-    A->>B: GET /internal/transfers/:id (only if the reply never arrived)
+```
+
+That's the event-driven path — every step above is a real message, and it's what settles the vast majority of transfers within milliseconds. It doesn't cover one case: the reply (or `transfer.initiated` itself) never arriving at all. That's handled by a completely separate, independent process:
+
+```mermaid
+sequenceDiagram
+    participant A as Bank A
+    participant B as Bank B
+
+    Note over A: ReconciliationService, every 60s:<br/>find interbank_transfers still DEBITED<br/>for more than 5 minutes
+    A->>B: GET /internal/transfers/:id
     B-->>A: ground truth (CREDITED / REJECTED / 404)
-    A->>A: apply the same CONFIRMED/COMPENSATED logic the reply path uses
+    Note over A: apply the same CONFIRMED/COMPENSATED<br/>logic the reply path uses above
 ```
 
 Three independent mechanisms make this safe under real-world failure, each solving a different distributed-systems problem:
