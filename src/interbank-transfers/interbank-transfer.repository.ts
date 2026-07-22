@@ -46,6 +46,27 @@ export class InterbankTransferRepository {
     );
     return rows[0] ? toRecord(rows[0]) : null;
   }
+
+  /**
+   * Both transitions guard on the current status being DEBITED, so they're
+   * idempotent under redelivery and can't clobber a state that's already
+   * terminal (e.g. a late duplicate "accepted" arriving after compensation).
+   */
+  async markConfirmed(transferId: string, executor: Pool | PoolClient = this.pool): Promise<void> {
+    await executor.query(
+      `UPDATE interbank_transfers SET status = 'CONFIRMED', updated_at = now()
+        WHERE transfer_id = $1 AND status = 'DEBITED'`,
+      [transferId],
+    );
+  }
+
+  async markCompensated(transferId: string, executor: Pool | PoolClient = this.pool): Promise<void> {
+    await executor.query(
+      `UPDATE interbank_transfers SET status = 'COMPENSATED', updated_at = now()
+        WHERE transfer_id = $1 AND status = 'DEBITED'`,
+      [transferId],
+    );
+  }
 }
 
 function toRecord(row: InterbankTransferRow): InterbankTransferRecord {

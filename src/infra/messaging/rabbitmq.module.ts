@@ -34,7 +34,7 @@ const logger = new Logger('RabbitMqModule');
     },
     RabbitMqPublisher,
   ],
-  exports: [RabbitMqPublisher],
+  exports: [RabbitMqPublisher, AMQP_CHANNEL],
 })
 export class RabbitMqModule implements OnApplicationShutdown {
   constructor(
