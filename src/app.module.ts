@@ -7,6 +7,7 @@ import { HealthModule } from './health/health.module';
 import { DomainExceptionFilter } from './http/domain-exception.filter';
 import { DatabaseModule } from './infra/database/database.module';
 import { RabbitMqModule } from './infra/messaging/rabbitmq.module';
+import { InterbankTransfersModule } from './interbank-transfers/interbank-transfers.module';
 import { LedgerModule } from './ledger/ledger.module';
 import { OutboxModule } from './outbox/outbox.module';
 import { TransfersModule } from './transfers/transfers.module';
@@ -22,6 +23,7 @@ import { TransfersModule } from './transfers/transfers.module';
     AccountsModule,
     TransfersModule,
     OutboxModule,
+    InterbankTransfersModule,
   ],
   providers: [{ provide: APP_FILTER, useClass: DomainExceptionFilter }],
 })

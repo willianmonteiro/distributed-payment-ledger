@@ -9,5 +9,6 @@ import { TransfersService } from './transfers.service';
   imports: [AccountsModule, LedgerModule],
   controllers: [TransfersController],
   providers: [TransfersService, TransferRepository],
+  exports: [TransferRepository],
 })
 export class TransfersModule {}

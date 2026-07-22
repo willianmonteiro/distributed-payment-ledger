@@ -1,9 +1,11 @@
-import { Global, Inject, Module, OnApplicationShutdown } from '@nestjs/common';
+import { Global, Inject, Logger, Module, OnApplicationShutdown } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as amqplib from 'amqplib';
 import { BANK_TRANSFERS_EXCHANGE } from './topology';
 import { RabbitMqPublisher } from './rabbitmq.publisher';
 import { AMQP_CHANNEL, AMQP_CONNECTION } from './tokens';
+
+const logger = new Logger('RabbitMqModule');
 
 @Global()
 @Module({
@@ -11,14 +13,21 @@ import { AMQP_CHANNEL, AMQP_CONNECTION } from './tokens';
     {
       provide: AMQP_CONNECTION,
       inject: [ConfigService],
-      useFactory: (config: ConfigService): Promise<amqplib.ChannelModel> =>
-        amqplib.connect(config.getOrThrow<string>('RABBITMQ_URL')),
+      useFactory: async (config: ConfigService): Promise<amqplib.ChannelModel> => {
+        const connection = await amqplib.connect(config.getOrThrow<string>('RABBITMQ_URL'));
+        // amqplib emits 'error' as a plain EventEmitter event; without a
+        // listener, Node treats it as unhandled and crashes the process —
+        // a broker hiccup would take down the whole HTTP server with it.
+        connection.on('error', (error) => logger.error('AMQP connection error', error));
+        return connection;
+      },
     },
     {
       provide: AMQP_CHANNEL,
       inject: [AMQP_CONNECTION],
       useFactory: async (connection: amqplib.ChannelModel): Promise<amqplib.Channel> => {
         const channel = await connection.createChannel();
+        channel.on('error', (error) => logger.error('AMQP channel error', error));
         await channel.assertExchange(BANK_TRANSFERS_EXCHANGE, 'topic', { durable: true });
         return channel;
       },
