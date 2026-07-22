@@ -67,6 +67,18 @@ export class InterbankTransferRepository {
       [transferId],
     );
   }
+
+  /** Transfers still DEBITED after the reply should have arrived — candidates for reconciliation. */
+  async findStaleDebited(olderThan: Date): Promise<InterbankTransferRecord[]> {
+    const { rows } = await this.pool.query<InterbankTransferRow>(
+      `SELECT transfer_id, payee_account_ref, status, created_at, updated_at
+         FROM interbank_transfers
+        WHERE status = 'DEBITED' AND updated_at < $1
+        ORDER BY updated_at`,
+      [olderThan],
+    );
+    return rows.map(toRecord);
+  }
 }
 
 function toRecord(row: InterbankTransferRow): InterbankTransferRecord {

@@ -8,6 +8,7 @@ import { InterbankReplyService } from './interbank-reply.service';
 import { InterbankTransferRepository } from './interbank-transfer.repository';
 import { InterbankTransfersController } from './interbank-transfers.controller';
 import { InterbankTransfersService } from './interbank-transfers.service';
+import { ReconciliationService } from './reconciliation.service';
 
 @Module({
   imports: [AccountsModule, LedgerModule, OutboxModule, TransfersModule],
@@ -17,6 +18,7 @@ import { InterbankTransfersService } from './interbank-transfers.service';
     InterbankTransferRepository,
     InterbankReplyService,
     InterbankReplyConsumer,
+    ReconciliationService,
   ],
 })
 export class InterbankTransfersModule {}

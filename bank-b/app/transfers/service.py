@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -52,7 +53,14 @@ class InboundTransfersService:
 
         record: IncomingTransferRecord | None
         async with self._pool.acquire() as connection, connection.transaction():
-            account = await self._accounts.find_by_id(event.payee_account_id)
+            # payee_account_id is opaque to Bank A — it never validates the
+            # format, so a malformed id has to be treated as "no such
+            # account" here rather than reaching the database as the wrong type.
+            account = (
+                await self._accounts.find_by_id(event.payee_account_id)
+                if _is_valid_uuid(event.payee_account_id)
+                else None
+            )
             if account is None:
                 # The incoming_transfers row is the record of "someone asked for this
                 # transfer_id"; it must be written before any ledger entry, or a lost
@@ -121,3 +129,11 @@ def _reply_for(record: IncomingTransferRecord) -> ReplyEvent:
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _is_valid_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(value)
+        return True
+    except ValueError:
+        return False
