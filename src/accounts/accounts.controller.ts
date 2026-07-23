@@ -1,7 +1,8 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Post } from '@nestjs/common';
-import { Account } from '../domain';
+import { Account, Money } from '../domain';
 import { AccountsService } from './accounts.service';
 import { CreateAccountDto } from './dto/create-account.dto';
+import { DevSeedDto } from './dto/dev-seed.dto';
 
 @Controller('accounts')
 export class AccountsController {
@@ -39,5 +40,15 @@ export class AccountsController {
         createdAt: line.createdAt,
       })),
     };
+  }
+
+  /** Demo/dev tooling only — see AccountsService.devSeed. */
+  @Post(':id/dev-seed')
+  async devSeed(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: DevSeedDto,
+  ): Promise<{ accountId: string; balanceCents: number }> {
+    const balance = await this.accountsService.devSeed(id, Money.fromCents(body.amountCents));
+    return { accountId: id, balanceCents: balance.cents };
   }
 }

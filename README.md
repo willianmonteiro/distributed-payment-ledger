@@ -2,27 +2,6 @@
 
 A double-entry payment ledger built with NestJS and PostgreSQL — a "mini-Pix" instant-payment core, evolved into a distributed clearing system between two independent bank services (Bank A in NestJS, Bank B in FastAPI) that settle transfers through a message broker.
 
-## Roadmap
-
-**Milestone 1 — single-bank ledger**
-- [x] Service scaffold: NestJS, PostgreSQL, SQL migrations, health check
-- [x] Domain model: money as integer cents, accounts, transfer invariants
-- [x] Append-only double-entry ledger with derived balances
-- [x] Atomic transfers: per-account locking + idempotency keys
-- [x] Integration test suite: concurrency and retry guarantees
-- [x] Full documentation with architecture diagrams
-
-**Milestone 2 — distributed clearing between two banks**
-- [x] Bank B scaffold: FastAPI, its own PostgreSQL, health check
-- [x] Transactional outbox + relay poller (Bank A)
-- [x] Interbank transfers via a suspense/transit account (Bank A)
-- [x] Bank B: domain model + append-only ledger (mirrors Bank A)
-- [x] Bank B: inbound transfer consumer, idempotent crediting
-- [x] Bank A: reply consumer + compensation on rejection
-- [x] Reconciliation job for transfers an event never resolved
-- [x] Dual-process saga end-to-end test suite
-- [x] Two-bank architecture documentation (this section)
-
 ## Why two banks
 
 A single-database ledger can make a transfer atomic for free — one Postgres transaction, one commit, done. Real interbank transfers can't: Bank A and Bank B have separate databases that can't share a transaction, and distributed two-phase commit isn't used in practice because a crashed coordinator leaves every participant blocked holding locks indefinitely. So milestone 2 is a deliberately harder, more realistic problem: move money between two systems that can only coordinate through asynchronous messages, without ever losing or duplicating it, given that any message can be delayed, lost, or delivered twice.
@@ -177,7 +156,7 @@ erDiagram
 | GET    | `/accounts/:id/statement`      |                                                                 |
 | GET    | `/internal/transfers/:id`      | Ground truth used by Bank A's reconciliation sweep — not meant for public/client use |
 
-Neither bank has a faucet/mint endpoint — every account starts at zero, so exercising a non-trivial transfer by hand means seeding a balance directly against Postgres (see `openWithBalance` in the integration tests, or `test/saga-e2e.spec.ts`'s `seedBankABalance`).
+Neither bank has a general-purpose faucet/mint endpoint — every account starts at zero. The one exception is `POST /accounts/:id/dev-seed` on Bank A, which funds an account from a well-known dev-treasury account via an ordinary double-entry transfer (same mechanism the integration tests' `openWithBalance` helper uses). It exists solely so the [demo frontend](#demo-frontend) below has something to click; it's not part of the API design.
 
 ## Running
 
@@ -198,6 +177,18 @@ poetry run uvicorn app.main:app --port 8001 --reload   # Bank B on :8001
 ```
 
 Health checks: `curl http://localhost:3000/health` and `curl http://localhost:8001/health`. RabbitMQ's management UI is at `http://localhost:15672` (guest/guest).
+
+## Demo frontend
+
+A small React (Vite) app in `frontend/` drives both banks directly from the browser — create an account on each side, fund the payer, send a transfer, and watch its saga status flip from `DEBITED` to `CONFIRMED` (or `COMPENSATED`) in real time as it polls Bank A.
+
+```sh
+cd frontend
+npm install
+npm run dev   # http://localhost:5173
+```
+
+Needs Bank A and Bank B already running (see above) — both have CORS open for local development. Copy `.env.example` to `.env` to point it at non-default ports.
 
 ## Testing
 
