@@ -6,7 +6,7 @@ import { Pool } from 'pg';
 import { DatabaseModule, PG_POOL } from '../infra/database/database.module';
 import { RabbitMqModule } from '../infra/messaging/rabbitmq.module';
 import { AMQP_CONNECTION } from '../infra/messaging/tokens';
-import { BANK_TRANSFERS_EXCHANGE } from '../infra/messaging/topology';
+import { HUB_SETTLEMENTS_EXCHANGE } from '../infra/messaging/topology';
 import { OutboxRelayService } from './outbox-relay.service';
 import { OutboxRepository } from './outbox.repository';
 
@@ -73,7 +73,7 @@ describe('OutboxRelayService (integration)', () => {
   }> {
     const channel = await testConnection.createChannel();
     const { queue } = await channel.assertQueue('', { exclusive: true });
-    await channel.bindQueue(queue, BANK_TRANSFERS_EXCHANGE, routingKey);
+    await channel.bindQueue(queue, HUB_SETTLEMENTS_EXCHANGE, routingKey);
 
     const received: unknown[] = [];
     await channel.consume(queue, (msg) => {

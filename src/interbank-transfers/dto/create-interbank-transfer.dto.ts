@@ -5,6 +5,10 @@ export class CreateInterbankTransferDto {
   payerAccountId!: string;
 
   @IsNotEmpty()
+  @MaxLength(64)
+  payeeBankId!: string;
+
+  @IsNotEmpty()
   @MaxLength(255)
   payeeAccountRef!: string;
 

@@ -6,6 +6,7 @@ export type InterbankTransferStatus = 'DEBITED' | 'CONFIRMED' | 'COMPENSATED';
 
 export interface InterbankTransferRecord {
   transferId: string;
+  payeeBankId: string;
   payeeAccountRef: string;
   status: InterbankTransferStatus;
   createdAt: Date;
@@ -14,11 +15,14 @@ export interface InterbankTransferRecord {
 
 interface InterbankTransferRow {
   transfer_id: string;
+  payee_bank_id: string;
   payee_account_ref: string;
   status: InterbankTransferStatus;
   created_at: Date;
   updated_at: Date;
 }
+
+const COLUMNS = 'transfer_id, payee_bank_id, payee_account_ref, status, created_at, updated_at';
 
 @Injectable()
 export class InterbankTransferRepository {
@@ -27,21 +31,20 @@ export class InterbankTransferRepository {
   /** Inserted once, atomically with the local transfer it accompanies — always starts DEBITED. */
   async insert(
     client: PoolClient,
-    params: { transferId: string; payeeAccountRef: string },
+    params: { transferId: string; payeeBankId: string; payeeAccountRef: string },
   ): Promise<InterbankTransferRecord> {
     const { rows } = await client.query<InterbankTransferRow>(
-      `INSERT INTO interbank_transfers (transfer_id, payee_account_ref, status)
-       VALUES ($1, $2, 'DEBITED')
-       RETURNING transfer_id, payee_account_ref, status, created_at, updated_at`,
-      [params.transferId, params.payeeAccountRef],
+      `INSERT INTO interbank_transfers (transfer_id, payee_bank_id, payee_account_ref, status)
+       VALUES ($1, $2, $3, 'DEBITED')
+       RETURNING ${COLUMNS}`,
+      [params.transferId, params.payeeBankId, params.payeeAccountRef],
     );
     return toRecord(rows[0]);
   }
 
   async findById(transferId: string): Promise<InterbankTransferRecord | null> {
     const { rows } = await this.pool.query<InterbankTransferRow>(
-      `SELECT transfer_id, payee_account_ref, status, created_at, updated_at
-         FROM interbank_transfers WHERE transfer_id = $1`,
+      `SELECT ${COLUMNS} FROM interbank_transfers WHERE transfer_id = $1`,
       [transferId],
     );
     return rows[0] ? toRecord(rows[0]) : null;
@@ -71,8 +74,7 @@ export class InterbankTransferRepository {
   /** Transfers still DEBITED after the reply should have arrived — candidates for reconciliation. */
   async findStaleDebited(olderThan: Date): Promise<InterbankTransferRecord[]> {
     const { rows } = await this.pool.query<InterbankTransferRow>(
-      `SELECT transfer_id, payee_account_ref, status, created_at, updated_at
-         FROM interbank_transfers
+      `SELECT ${COLUMNS} FROM interbank_transfers
         WHERE status = 'DEBITED' AND updated_at < $1
         ORDER BY updated_at`,
       [olderThan],
@@ -84,6 +86,7 @@ export class InterbankTransferRepository {
 function toRecord(row: InterbankTransferRow): InterbankTransferRecord {
   return {
     transferId: row.transfer_id,
+    payeeBankId: row.payee_bank_id,
     payeeAccountRef: row.payee_account_ref,
     status: row.status,
     createdAt: row.created_at,

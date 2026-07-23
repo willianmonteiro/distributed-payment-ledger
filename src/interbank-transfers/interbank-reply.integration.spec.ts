@@ -15,8 +15,8 @@ import { InterbankTransfersService } from './interbank-transfers.service';
 
 /**
  * Exercises the reply consumer's business logic directly (bypassing the real
- * AMQP wire) against the real Postgres — the live saga run (Bank A + Bank B +
- * RabbitMQ together) is what proved the wire format matches; this proves the
+ * AMQP wire) against the real Postgres — the live saga run (Bank A + Hub +
+ * Bank B together) is what proved the wire format matches; this proves the
  * state machine and compensation are correct under redelivery and races.
  */
 describe('InterbankReplyService (integration)', () => {
@@ -70,38 +70,35 @@ describe('InterbankReplyService (integration)', () => {
     return account.id;
   }
 
-  it('marks the transfer CONFIRMED on an accepted reply, without touching the ledger', async () => {
+  it('marks the transfer CONFIRMED on a confirmed outcome, without touching the ledger', async () => {
     const payer = await openWithBalance(5_000);
     const { transfer } = await interbankTransfers.execute(`reply-accept-${payer}`, {
       payerAccountId: payer,
+      payeeBankId: 'bank-b',
       payeeAccountRef: 'bank-b-ref',
       amount: Money.fromCents(1_000),
     });
 
-    await replyService.handle({
-      eventType: 'transfer.accepted',
-      transferId: transfer.id,
-      occurredAt: new Date().toISOString(),
-    });
+    await replyService.handle({ settlementId: transfer.id, outcome: 'CONFIRMED' });
 
     expect((await interbankTransferRepo.findById(transfer.id))?.status).toBe('CONFIRMED');
     expect((await ledger.balanceOf(payer)).cents).toBe(4_000);
   });
 
-  it('compensates the payer in full on a rejected reply', async () => {
+  it('compensates the payer in full on a reversed outcome', async () => {
     const payer = await openWithBalance(5_000);
     const { transfer } = await interbankTransfers.execute(`reply-reject-${payer}`, {
       payerAccountId: payer,
+      payeeBankId: 'bank-b',
       payeeAccountRef: 'bank-b-ref',
       amount: Money.fromCents(1_500),
     });
     expect((await ledger.balanceOf(payer)).cents).toBe(3_500);
 
     await replyService.handle({
-      eventType: 'transfer.rejected',
-      transferId: transfer.id,
+      settlementId: transfer.id,
+      outcome: 'REVERSED',
       reason: 'ACCOUNT_NOT_FOUND',
-      occurredAt: new Date().toISOString(),
     });
 
     expect((await interbankTransferRepo.findById(transfer.id))?.status).toBe('COMPENSATED');
@@ -115,18 +112,34 @@ describe('InterbankReplyService (integration)', () => {
     expect(Number(rows[0].amount)).toBe(1_500);
   });
 
-  it('is idempotent under a redelivered accepted reply', async () => {
+  it('compensates the payer on a rejected outcome (Hub never recognized the payee bank)', async () => {
+    const payer = await openWithBalance(5_000);
+    const { transfer } = await interbankTransfers.execute(`reply-unknown-bank-${payer}`, {
+      payerAccountId: payer,
+      payeeBankId: 'bank-zzz',
+      payeeAccountRef: 'whatever',
+      amount: Money.fromCents(800),
+    });
+
+    await replyService.handle({
+      settlementId: transfer.id,
+      outcome: 'REJECTED',
+      reason: 'UNKNOWN_PAYEE_BANK',
+    });
+
+    expect((await interbankTransferRepo.findById(transfer.id))?.status).toBe('COMPENSATED');
+    expect((await ledger.balanceOf(payer)).cents).toBe(5_000);
+  });
+
+  it('is idempotent under a redelivered confirmed outcome', async () => {
     const payer = await openWithBalance(5_000);
     const { transfer } = await interbankTransfers.execute(`reply-accept-redelivery-${payer}`, {
       payerAccountId: payer,
+      payeeBankId: 'bank-b',
       payeeAccountRef: 'bank-b-ref',
       amount: Money.fromCents(1_000),
     });
-    const event = {
-      eventType: 'transfer.accepted' as const,
-      transferId: transfer.id,
-      occurredAt: new Date().toISOString(),
-    };
+    const event = { settlementId: transfer.id, outcome: 'CONFIRMED' as const };
 
     await replyService.handle(event);
     await replyService.handle(event);
@@ -134,18 +147,18 @@ describe('InterbankReplyService (integration)', () => {
     expect((await interbankTransferRepo.findById(transfer.id))?.status).toBe('CONFIRMED');
   });
 
-  it('compensates exactly once under concurrent redelivery of a rejected reply', async () => {
+  it('compensates exactly once under concurrent redelivery of a reversed outcome', async () => {
     const payer = await openWithBalance(5_000);
     const { transfer } = await interbankTransfers.execute(`reply-reject-redelivery-${payer}`, {
       payerAccountId: payer,
+      payeeBankId: 'bank-b',
       payeeAccountRef: 'bank-b-ref',
       amount: Money.fromCents(1_000),
     });
     const event = {
-      eventType: 'transfer.rejected' as const,
-      transferId: transfer.id,
+      settlementId: transfer.id,
+      outcome: 'REVERSED' as const,
       reason: 'ACCOUNT_NOT_FOUND',
-      occurredAt: new Date().toISOString(),
     };
 
     await Promise.all([replyService.handle(event), replyService.handle(event)]);
@@ -153,19 +166,17 @@ describe('InterbankReplyService (integration)', () => {
     expect((await interbankTransferRepo.findById(transfer.id))?.status).toBe('COMPENSATED');
     expect((await ledger.balanceOf(payer)).cents).toBe(5_000);
 
-    const { rows } = await pool.query(
-      'SELECT id FROM transfers WHERE idempotency_key = $1',
-      [`compensation-${transfer.id}`],
-    );
+    const { rows } = await pool.query('SELECT id FROM transfers WHERE idempotency_key = $1', [
+      `compensation-${transfer.id}`,
+    ]);
     expect(rows).toHaveLength(1);
   });
 
-  it('throws when the reply references a transfer Bank A has no record of', async () => {
+  it('throws when the outcome references a transfer this bank has no record of', async () => {
     await expect(
       replyService.handle({
-        eventType: 'transfer.accepted',
-        transferId: '00000000-0000-0000-0000-000000000099',
-        occurredAt: new Date().toISOString(),
+        settlementId: '00000000-0000-0000-0000-000000000099',
+        outcome: 'CONFIRMED',
       }),
     ).rejects.toThrow();
   });

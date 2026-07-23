@@ -15,7 +15,13 @@ import { InterbankTransfersService } from './interbank-transfers.service';
 interface OutboxRow {
   event_type: string;
   routing_key: string;
-  payload: { transferId: string; payeeAccountId: string; amountCents: number; occurredAt: string };
+  payload: {
+    settlementId: string;
+    payerBankId: string;
+    payeeBankId: string;
+    payeeAccountRef: string;
+    amountCents: number;
+  };
   published_at: Date | null;
 }
 
@@ -98,6 +104,7 @@ describe('InterbankTransfersService (integration)', () => {
 
     const result = await interbankTransfers.execute(`ib-happy-${payer}`, {
       payerAccountId: payer,
+      payeeBankId: 'bank-b',
       payeeAccountRef: 'bank-b-account-ref-1',
       amount: Money.fromCents(2_000),
     });
@@ -110,9 +117,11 @@ describe('InterbankTransfersService (integration)', () => {
 
     const outboxRow = await outboxRowFor(result.transfer.id);
     expect(outboxRow).not.toBeNull();
-    expect(outboxRow?.event_type).toBe('transfer.initiated');
-    expect(outboxRow?.routing_key).toBe('transfer.initiated.bank-b');
-    expect(outboxRow?.payload.payeeAccountId).toBe('bank-b-account-ref-1');
+    expect(outboxRow?.event_type).toBe('settlement.requested');
+    expect(outboxRow?.routing_key).toBe('settlement.requested');
+    expect(outboxRow?.payload.payerBankId).toBe('bank-a');
+    expect(outboxRow?.payload.payeeBankId).toBe('bank-b');
+    expect(outboxRow?.payload.payeeAccountRef).toBe('bank-b-account-ref-1');
     expect(outboxRow?.payload.amountCents).toBe(2_000);
     expect(outboxRow?.published_at).toBeNull();
 
@@ -124,6 +133,7 @@ describe('InterbankTransfersService (integration)', () => {
     const key = `ib-retry-${payer}`;
     const params = {
       payerAccountId: payer,
+      payeeBankId: 'bank-b',
       payeeAccountRef: 'bank-b-account-ref-2',
       amount: Money.fromCents(1_500),
     };
@@ -141,6 +151,7 @@ describe('InterbankTransfersService (integration)', () => {
 
     await interbankTransfers.execute(key, {
       payerAccountId: payer,
+      payeeBankId: 'bank-b',
       payeeAccountRef: 'bank-b-account-ref-3',
       amount: Money.fromCents(1_000),
     });
@@ -148,6 +159,7 @@ describe('InterbankTransfersService (integration)', () => {
     await expect(
       interbankTransfers.execute(key, {
         payerAccountId: payer,
+        payeeBankId: 'bank-b',
         payeeAccountRef: 'a-different-remote-account',
         amount: Money.fromCents(1_000),
       }),
@@ -161,6 +173,7 @@ describe('InterbankTransfersService (integration)', () => {
       interbankTransfers
         .execute(`ib-concurrent-${payer}-${i}`, {
           payerAccountId: payer,
+          payeeBankId: 'bank-b',
           payeeAccountRef: 'bank-b-account-ref-concurrent',
           amount: Money.fromCents(1_000),
         })

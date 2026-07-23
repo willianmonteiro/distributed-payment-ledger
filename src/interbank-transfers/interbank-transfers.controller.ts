@@ -15,6 +15,7 @@ import { InterbankTransferResult, InterbankTransfersService } from './interbank-
 interface InterbankTransferResponse {
   transferId: string;
   payerAccountId: string;
+  payeeBankId: string;
   payeeAccountRef: string;
   amountCents: number;
   status: string;
@@ -37,6 +38,7 @@ export class InterbankTransfersController {
     }
     const result = await this.interbankTransfers.execute(idempotencyKey, {
       payerAccountId: body.payerAccountId,
+      payeeBankId: body.payeeBankId,
       payeeAccountRef: body.payeeAccountRef,
       amount: Money.fromCents(body.amountCents),
     });
@@ -53,6 +55,7 @@ function toResponse(result: InterbankTransferResult): InterbankTransferResponse 
   return {
     transferId: result.transfer.id,
     payerAccountId: result.transfer.payerAccountId,
+    payeeBankId: result.interbank.payeeBankId,
     payeeAccountRef: result.interbank.payeeAccountRef,
     amountCents: result.transfer.amount.cents,
     status: result.interbank.status,

@@ -1,13 +1,12 @@
 import { Inject, Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Channel, ConsumeMessage } from 'amqplib';
 import { AMQP_CHANNEL } from '../infra/messaging/tokens';
-import { BANK_TRANSFERS_EXCHANGE } from '../infra/messaging/topology';
-import { InterbankReplyService, ReplyEvent } from './interbank-reply.service';
+import { HUB_SETTLEMENTS_EXCHANGE, settlementOutcomeRoutingKey } from '../infra/messaging/topology';
+import { InterbankReplyService, SettlementOutcomeEvent } from './interbank-reply.service';
 
-const QUEUE_NAME = 'bank-a.transfers.replies';
-const DLX_NAME = 'bank-a.transfers.replies.dlx';
-const DLQ_NAME = 'bank-a.transfers.replies.dlq';
-const ROUTING_KEY = 'transfer.reply.bank-a';
+const DLX_NAME = 'bank-a.settlement-outcomes.dlx';
+const DLQ_NAME = 'bank-a.settlement-outcomes.dlq';
 
 @Injectable()
 export class InterbankReplyConsumer implements OnApplicationBootstrap {
@@ -16,35 +15,40 @@ export class InterbankReplyConsumer implements OnApplicationBootstrap {
   constructor(
     @Inject(AMQP_CHANNEL) private readonly channel: Channel,
     private readonly replyService: InterbankReplyService,
+    private readonly config: ConfigService,
   ) {}
 
   async onApplicationBootstrap(): Promise<void> {
+    const bankId = this.config.getOrThrow<string>('BANK_ID');
+    const queueName = `${bankId}.settlement-outcomes`;
+    const routingKey = settlementOutcomeRoutingKey(bankId);
+
     // A malformed payload or a bug in handle() would otherwise redeliver
     // forever; nacking with requeue=false routes it here instead, where it
-    // waits for a human — same DLX pattern as Bank B's inbound queue.
+    // waits for a human — same DLX pattern as every other consumer.
     await this.channel.assertExchange(DLX_NAME, 'fanout', { durable: true });
     await this.channel.assertQueue(DLQ_NAME, { durable: true });
     await this.channel.bindQueue(DLQ_NAME, DLX_NAME, '');
 
-    await this.channel.assertQueue(QUEUE_NAME, {
+    await this.channel.assertQueue(queueName, {
       durable: true,
       arguments: { 'x-dead-letter-exchange': DLX_NAME },
     });
-    await this.channel.bindQueue(QUEUE_NAME, BANK_TRANSFERS_EXCHANGE, ROUTING_KEY);
+    await this.channel.bindQueue(queueName, HUB_SETTLEMENTS_EXCHANGE, routingKey);
 
-    await this.channel.consume(QUEUE_NAME, (msg) => void this.onMessage(msg));
-    this.logger.log(`Consuming ${QUEUE_NAME} bound to ${ROUTING_KEY}`);
+    await this.channel.consume(queueName, (msg) => void this.onMessage(msg));
+    this.logger.log(`Consuming ${queueName} bound to ${routingKey}`);
   }
 
   private async onMessage(msg: ConsumeMessage | null): Promise<void> {
     if (!msg) return;
     try {
-      const event = JSON.parse(msg.content.toString()) as ReplyEvent;
+      const event = JSON.parse(msg.content.toString()) as SettlementOutcomeEvent;
       await this.replyService.handle(event);
       this.channel.ack(msg);
     } catch (error) {
       this.logger.error(
-        'Failed to process transfer.reply message; routed to DLQ',
+        'Failed to process settlement.outcome message; routed to DLQ',
         error instanceof Error ? error.stack : error,
       );
       this.channel.nack(msg, false, false);

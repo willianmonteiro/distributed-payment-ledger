@@ -3,7 +3,7 @@ import { Interval } from '@nestjs/schedule';
 import { Pool } from 'pg';
 import { PG_POOL } from '../infra/database/database.module';
 import { RabbitMqPublisher } from '../infra/messaging/rabbitmq.publisher';
-import { BANK_TRANSFERS_EXCHANGE } from '../infra/messaging/topology';
+import { HUB_SETTLEMENTS_EXCHANGE } from '../infra/messaging/topology';
 import { OutboxRepository } from './outbox.repository';
 
 const BATCH_SIZE = 100;
@@ -31,7 +31,7 @@ export class OutboxRelayService {
       await client.query('BEGIN');
       const events = await this.outbox.claimUnpublished(client, BATCH_SIZE);
       for (const event of events) {
-        this.publisher.publish(BANK_TRANSFERS_EXCHANGE, event.routingKey, event.payload);
+        this.publisher.publish(HUB_SETTLEMENTS_EXCHANGE, event.routingKey, event.payload);
         await this.outbox.markPublished(client, event.id);
         published += 1;
       }

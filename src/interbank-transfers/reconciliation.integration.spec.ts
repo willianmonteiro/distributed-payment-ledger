@@ -16,19 +16,19 @@ import { InterbankTransfersService } from './interbank-transfers.service';
 import { ReconciliationService } from './reconciliation.service';
 
 /**
- * Stands in for Bank B's GET /internal/transfers/:id so the test controls
- * exactly what "the truth at Bank B" is, without needing Bank B running.
- * Points BANK_B_URL at itself — ReconciliationService reads that env var
- * fresh on every call, so this works without touching app wiring.
+ * Stands in for the Hub's GET /settlements/:id so the test controls exactly
+ * what "the truth at the Hub" is, without needing the Hub running. Points
+ * HUB_URL at itself — ReconciliationService reads that env var fresh on
+ * every call, so this works without touching app wiring.
  */
-function startFakeBankB(): {
+function startFakeHub(): {
   server: http.Server;
   responses: Map<string, { status: number; body?: unknown }>;
   close: () => Promise<void>;
 } {
   const responses = new Map<string, { status: number; body?: unknown }>();
   const server = http.createServer((req, res) => {
-    const id = (req.url ?? '').replace('/internal/transfers/', '');
+    const id = (req.url ?? '').replace('/settlements/', '');
     const canned = responses.get(id);
     if (!canned) {
       res.writeHead(404).end();
@@ -52,13 +52,13 @@ describe('ReconciliationService (integration)', () => {
   let interbankTransferRepo: InterbankTransferRepository;
   let reconciliation: ReconciliationService;
   let amqpConnection: amqplib.ChannelModel;
-  let fakeBankB: ReturnType<typeof startFakeBankB>;
+  let fakeHub: ReturnType<typeof startFakeHub>;
 
   beforeAll(async () => {
-    fakeBankB = startFakeBankB();
-    await new Promise<void>((resolve) => fakeBankB.server.listen(0, resolve));
-    const { port } = fakeBankB.server.address() as AddressInfo;
-    process.env.BANK_B_URL = `http://localhost:${port}`;
+    fakeHub = startFakeHub();
+    await new Promise<void>((resolve) => fakeHub.server.listen(0, resolve));
+    const { port } = fakeHub.server.address() as AddressInfo;
+    process.env.HUB_URL = `http://localhost:${port}`;
 
     const moduleRef = await Test.createTestingModule({
       imports: [
@@ -79,7 +79,7 @@ describe('ReconciliationService (integration)', () => {
   });
 
   afterAll(async () => {
-    await fakeBankB.close();
+    await fakeHub.close();
     await amqpConnection.close();
     await pool.end();
   });
@@ -105,6 +105,7 @@ describe('ReconciliationService (integration)', () => {
   async function makeStaleDebitedTransfer(payer: string, idempotencyKey: string, amountCents: number): Promise<string> {
     const { transfer } = await interbankTransfers.execute(idempotencyKey, {
       payerAccountId: payer,
+      payeeBankId: 'bank-b',
       payeeAccountRef: 'bank-b-ref',
       amount: Money.fromCents(amountCents),
     });
@@ -115,7 +116,7 @@ describe('ReconciliationService (integration)', () => {
     return transfer.id;
   }
 
-  it('compensates when Bank B has no record of the transfer', async () => {
+  it('compensates when the Hub has no record of the settlement', async () => {
     const payer = await openWithBalance(5_000);
     const transferId = await makeStaleDebitedTransfer(payer, `recon-missing-${payer}`, 1_000);
     // No canned response registered for this id -> the fake server 404s.
@@ -125,25 +126,25 @@ describe('ReconciliationService (integration)', () => {
     expect((await ledger.balanceOf(payer)).cents).toBe(5_000);
   });
 
-  it('confirms when Bank B already credited it (an accepted reply was lost)', async () => {
+  it('confirms when the Hub already settled it (a confirmed outcome was lost)', async () => {
     const payer = await openWithBalance(5_000);
-    const transferId = await makeStaleDebitedTransfer(payer, `recon-credited-${payer}`, 1_000);
-    fakeBankB.responses.set(transferId, {
+    const transferId = await makeStaleDebitedTransfer(payer, `recon-confirmed-${payer}`, 1_000);
+    fakeHub.responses.set(transferId, {
       status: 200,
-      body: { status: 'CREDITED', reject_reason: null },
+      body: { status: 'CONFIRMED', rejectReason: null },
     });
 
     expect(await reconciliation.reconcileOne(transferId)).toBe(true);
     expect((await interbankTransferRepo.findById(transferId))?.status).toBe('CONFIRMED');
-    expect((await ledger.balanceOf(payer)).cents).toBe(4_000); // only the reply was lost, not the money
+    expect((await ledger.balanceOf(payer)).cents).toBe(4_000); // only the outcome event was lost, not the money
   });
 
-  it('compensates when Bank B already rejected it (a rejected reply was lost)', async () => {
+  it('compensates when the Hub already reversed it (a reversed outcome was lost)', async () => {
     const payer = await openWithBalance(5_000);
-    const transferId = await makeStaleDebitedTransfer(payer, `recon-rejected-${payer}`, 1_000);
-    fakeBankB.responses.set(transferId, {
+    const transferId = await makeStaleDebitedTransfer(payer, `recon-reversed-${payer}`, 1_000);
+    fakeHub.responses.set(transferId, {
       status: 200,
-      body: { status: 'REJECTED', reject_reason: 'ACCOUNT_NOT_FOUND' },
+      body: { status: 'REVERSED', rejectReason: 'ACCOUNT_NOT_FOUND' },
     });
 
     expect(await reconciliation.reconcileOne(transferId)).toBe(true);
@@ -151,10 +152,24 @@ describe('ReconciliationService (integration)', () => {
     expect((await ledger.balanceOf(payer)).cents).toBe(5_000);
   });
 
+  it('leaves a still-PENDING settlement alone — the Hub itself is still waiting', async () => {
+    const payer = await openWithBalance(5_000);
+    const transferId = await makeStaleDebitedTransfer(payer, `recon-pending-${payer}`, 1_000);
+    fakeHub.responses.set(transferId, {
+      status: 200,
+      body: { status: 'PENDING', rejectReason: null },
+    });
+
+    expect(await reconciliation.reconcileOne(transferId)).toBe(false);
+    expect((await interbankTransferRepo.findById(transferId))?.status).toBe('DEBITED');
+    expect((await ledger.balanceOf(payer)).cents).toBe(4_000);
+  });
+
   it('a sweep leaves fresh transfers alone and only touches stale ones', async () => {
     const payer = await openWithBalance(5_000);
     const { transfer: fresh } = await interbankTransfers.execute(`recon-fresh-${payer}`, {
       payerAccountId: payer,
+      payeeBankId: 'bank-b',
       payeeAccountRef: 'bank-b-ref',
       amount: Money.fromCents(500),
     });

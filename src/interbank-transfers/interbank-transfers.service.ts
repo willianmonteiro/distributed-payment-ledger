@@ -1,4 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
 import {
@@ -11,6 +12,7 @@ import {
 } from '../domain';
 import { AccountRepository } from '../accounts/account.repository';
 import { PG_POOL } from '../infra/database/database.module';
+import { SETTLEMENT_REQUESTED_ROUTING_KEY } from '../infra/messaging/topology';
 import { LedgerRepository } from '../ledger/ledger.repository';
 import { OutboxRepository } from '../outbox/outbox.repository';
 import { TransferRecord, TransferRepository } from '../transfers/transfer.repository';
@@ -18,7 +20,8 @@ import { InterbankTransferRecord, InterbankTransferRepository } from './interban
 
 export interface InterbankTransferParams {
   payerAccountId: string;
-  /** Opaque account identifier at Bank B — meaningless to Bank A beyond routing the event. */
+  payeeBankId: string;
+  /** Opaque account identifier at the payee bank — meaningless to this bank beyond routing the event. */
   payeeAccountRef: string;
   amount: Money;
 }
@@ -27,8 +30,6 @@ export interface InterbankTransferResult {
   transfer: TransferRecord;
   interbank: InterbankTransferRecord;
 }
-
-const TRANSFER_INITIATED_ROUTING_KEY = 'transfer.initiated.bank-b';
 
 @Injectable()
 export class InterbankTransfersService {
@@ -39,6 +40,7 @@ export class InterbankTransfersService {
     private readonly accounts: AccountRepository,
     private readonly ledger: LedgerRepository,
     private readonly outbox: OutboxRepository,
+    private readonly config: ConfigService,
   ) {}
 
   async execute(
@@ -53,7 +55,7 @@ export class InterbankTransfersService {
     });
 
     const existing = await this.transfers.findByIdempotencyKey(idempotencyKey);
-    if (existing) return this.replay(existing, transfer, params.payeeAccountRef);
+    if (existing) return this.replay(existing, transfer, params.payeeBankId, params.payeeAccountRef);
 
     const client = await this.pool.connect();
     let result: InterbankTransferResult | null = null;
@@ -73,18 +75,20 @@ export class InterbankTransfersService {
 
         const interbank = await this.interbankTransfers.insert(client, {
           transferId: transfer.id,
+          payeeBankId: params.payeeBankId,
           payeeAccountRef: params.payeeAccountRef,
         });
 
         await this.outbox.insert(client, {
           aggregateId: transfer.id,
-          eventType: 'transfer.initiated',
-          routingKey: TRANSFER_INITIATED_ROUTING_KEY,
+          eventType: 'settlement.requested',
+          routingKey: SETTLEMENT_REQUESTED_ROUTING_KEY,
           payload: {
-            transferId: transfer.id,
-            payeeAccountId: params.payeeAccountRef,
+            settlementId: transfer.id,
+            payerBankId: this.config.getOrThrow<string>('BANK_ID'),
+            payeeBankId: params.payeeBankId,
+            payeeAccountRef: params.payeeAccountRef,
             amountCents: params.amount.cents,
-            occurredAt: new Date().toISOString(),
           },
         });
 
@@ -105,7 +109,7 @@ export class InterbankTransfersService {
     // (ON CONFLICT only skips after the competing transaction commits).
     const winner = await this.transfers.findByIdempotencyKey(idempotencyKey);
     if (!winner) throw new Error(`Interbank transfer with idempotency key ${idempotencyKey} vanished.`);
-    return this.replay(winner, transfer, params.payeeAccountRef);
+    return this.replay(winner, transfer, params.payeeBankId, params.payeeAccountRef);
   }
 
   async getTransfer(transferId: string): Promise<InterbankTransferResult> {
@@ -120,6 +124,7 @@ export class InterbankTransfersService {
   private async replay(
     existing: TransferRecord,
     attempted: Transfer,
+    payeeBankId: string,
     payeeAccountRef: string,
   ): Promise<InterbankTransferResult> {
     const matches =
@@ -129,7 +134,11 @@ export class InterbankTransfersService {
     if (!matches) throw new IdempotencyConflictError();
 
     const interbank = await this.interbankTransfers.findById(existing.id);
-    if (!interbank || interbank.payeeAccountRef !== payeeAccountRef) {
+    if (
+      !interbank ||
+      interbank.payeeBankId !== payeeBankId ||
+      interbank.payeeAccountRef !== payeeAccountRef
+    ) {
       throw new IdempotencyConflictError();
     }
     return { transfer: existing, interbank };
