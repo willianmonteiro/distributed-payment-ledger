@@ -35,7 +35,11 @@ const COLUMNS =
 export class SettlementRepository {
   constructor(@Inject(PG_POOL) private readonly pool: Pool) {}
 
-  /** Inserted once, atomically with the reserve entries it accompanies (PENDING) or alone (REJECTED). */
+  /**
+   * Inserted once, atomically with the reserve entries it accompanies (PENDING) or alone
+   * (REJECTED). Returns null when `id` already exists — a redelivery of settlement.requested
+   * lost the race, not an error; the winning delivery already did (or is doing) the work.
+   */
   async insert(
     client: PoolClient,
     params: {
@@ -47,10 +51,11 @@ export class SettlementRepository {
       status: 'PENDING' | 'REJECTED';
       rejectReason: string | null;
     },
-  ): Promise<SettlementRecord> {
+  ): Promise<SettlementRecord | null> {
     const { rows } = await client.query<SettlementRow>(
       `INSERT INTO settlements (id, payer_bank_id, payee_bank_id, payee_account_ref, amount, status, reject_reason)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (id) DO NOTHING
        RETURNING ${COLUMNS}`,
       [
         params.id,
@@ -62,7 +67,7 @@ export class SettlementRepository {
         params.rejectReason,
       ],
     );
-    return toRecord(rows[0]);
+    return rows[0] ? toRecord(rows[0]) : null;
   }
 
   async findById(id: string, executor: Pool | PoolClient = this.pool): Promise<SettlementRecord | null> {
