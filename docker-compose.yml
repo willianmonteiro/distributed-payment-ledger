@@ -33,9 +33,26 @@ services:
     volumes:
       - postgres-bank-b-data:/var/lib/postgresql/data
 
-  # Message broker between Bank A and Bank B. Ephemeral by design: the
-  # outbox table in each bank's own Postgres is the durable source of
-  # truth, not the broker — a lost queue just means the relay republishes.
+  # Hub (hub/, NestJS) — the central settlement authority every bank talks to.
+  postgres-hub:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: hub
+      POSTGRES_PASSWORD: hub
+      POSTGRES_DB: hub
+    ports:
+      - '5435:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U hub']
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    volumes:
+      - postgres-hub-data:/var/lib/postgresql/data
+
+  # Message broker shared by every bank and the Hub. Ephemeral by design:
+  # the outbox table in each service's own Postgres is the durable source
+  # of truth, not the broker — a lost queue just means the relay republishes.
   rabbitmq:
     image: rabbitmq:4-management
     ports:
@@ -50,3 +67,4 @@ services:
 volumes:
   postgres-data:
   postgres-bank-b-data:
+  postgres-hub-data:
